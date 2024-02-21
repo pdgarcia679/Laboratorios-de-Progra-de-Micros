@@ -1,0 +1,247 @@
+ ;*****************************************************************************
+ ; Universidad del Valle de Guatemala
+ ; IE2023: Programacion de Microcontroladores
+ ; Autor: Pablo Garcia
+ ; Proyecto: Laboratorio 3 (Post)
+ ; Archivo: PostLaboratorio3.asm (main)
+ ; Hardware: ATMEGA328P
+ ; Created: 15/02/2024
+ ;*****************************************************************************
+ .include "M328PDEF.inc"
+ .cseg
+ .org 0x0000	JMP		STACK
+ .org 0x0008	JMP		PINCHANGE_INT1
+ .org 0x0012	JMP		TIMER2_OVF
+ .org 0x0020	JMP		TIMER0_OVF
+
+ STACK:
+ 	LDI		R16, LOW(RAMEND)
+	OUT		SPL, R16
+	LDI		R16, HIGH(RAMEND)
+	OUT		SPH, R16
+
+ ;*****************************************************************************
+ SETUP:
+ ; INTERRUPTIONS
+ 	SEI
+
+ ; CLOCK
+	LDI		R16, (1<<CLKPCE)
+	STS		CLKPR, R16			// Enable changes of the CLKPS bits
+	LDI		R16, 0x04
+	STS		CLKPR, R16			// Preescaler divider: 16. fclk = 1 MHz
+ 
+ ; TIMER0
+	LDI		R16, (1<<TOIE0)
+	STS		TIMSK0, R16			// Overflow	interrupt enable
+	LDI		R16, (0<<WGM01)|(0<<WGM00)
+	OUT		TCCR0A, R16			// Normal mode operation
+	LDI		R16, (1<<CS02)
+	OUT		TCCR0B, R16			// Preescaler: 256
+	LDI		R16, 236
+	OUT		TCNT0, R16			// Restart Timer0
+
+ ; TIMER2
+	LDI		R16, (0<<TOIE2)
+	STS		TIMSK2, R16			// Overflow interrupt disable
+	LDI		R16, (0<<WGM21)|(0<<WGM20)
+	STS		TCCR2A, R16			// Normal mode operation
+	LDI		R16, (1<<CS22)|(1<<CS21)|(1<<CS20)
+	STS		TCCR2B, R16			// Preescaler: 1024
+	
+ ; INPUTS
+ ; IncButton: PC1(PCINT9), DecButton: PC2(PCINT10)
+	LDI		R16, (1<<PCIE1)
+	STS		PCICR, R16			// Pin change interrupt enable 1
+	LDI		R16, (1<<PCINT9)|(1<<PCINT10)
+	STS		PCMSK1, R16			// Pin change enable mask
+
+	LDI		R16, (0<<PC1)|(0<<PC2)
+	OUT		DDRC, R16			// Pins PC1 and PC2 as inputs
+	NOP
+	LDI		R16, (1<<PC1)|(1<<PC2)
+	OUT		PORTC, R16			// Pins PC1 and PC2 with pull-up
+	NOP
+
+ ; OUTPUTS
+ ; Counter: [PB4,PB3,PB2,PB1] Buzzer: PB5
+ ; Display: [PD7,PD6,PC0,PD4,PD3,PB0,PD5] : [a,b,c,d,e,f,g]
+	LDI		R16, 0x3F
+	OUT		DDRB, R16			// Pins of PORTB as outputs
+	NOP
+	LDI		R16, 0xFB
+	OUT		DDRD, R16			// Pins of PORTD as outputs
+	NOP
+	SBI		DDRC, PC0
+	NOP
+	LDI		R16, 0x00
+	OUT		PORTB, R16			// Clear pins of PORTB
+	OUT		PORTD, R16			// Clear pins of PORTD
+	CBI		PORTC, PC0
+	NOP
+	LDI		R16, (0<<TXEN0)|(0<<RXEN0)
+	STS		UCSR0B, R16
+	SBI		PORTD, PD0
+	CBI		PORTB, PD1
+	NOP
+
+ ; INDIRECT DIRECTIONS
+ TABLA7SEG: .DB	0x7E, 0x30, 0x6D, 0x79, 0x33, 0x5B, 0x5F, 0x70, 0x7F, 0x7B, 0x77, 0x1F, 0x4E, 0x3D, 0x4F, 0x47
+ // FLASH addrs 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD, 0xBE, 0xBF, 0xC0, 0xC1, 0xC2, 0xC3
+ 	LDI		ZL, LOW(TABLA7SEG<<1)	// Obtain initial direction of table (1/2)
+	LDI		ZH, HIGH(TABLA7SEG<<1)  // Obtain initial direction of table (2/2)
+	MOV		R18, ZL				// LDS. Extract ZL
+	MOV		R19, ZL				// LDS. Extract ZL
+
+ ;*****************************************************************************
+ LOOP:
+	SBRC	R20, 0
+	CALL	INCCOUNT			// R20[0] function
+	SBRC	R20, 1
+	CALL	DECCOUNT			// R20[1] function
+	SBRC	R20, 2
+	CALL	STEP				// R20[2] function
+	SBIC	PORTD, PD1
+	CALL	SECONDS
+	SBIC	PORTD, PD0
+	CALL	DECADES
+	CPSE	R21, R22
+	CALL	COUNTER				// By pin change function
+
+	RJMP	LOOP				// Looping
+
+ INCCOUNT:
+	LDI		R20, (0<<0)			// INCCOUNT end execution
+	INC		R21
+	SBRC	R21, 4
+	CLR		R21
+	RET
+
+ DECCOUNT:
+	LDI		R20, (0<<1)			// DECCOUNT end execution
+	DEC		R21
+	SBRC	R21, 4
+	LDI		R21, 0x0F
+	RET
+
+ STEP:
+	LDI		R20, (0<<2)			// STEP end execution
+	LDI		R16, 236
+	OUT		TCNT0, R16			// Restart Timer0
+	SBI		PIND, PD0
+	SBI		PIND, PD1
+	INC		R24
+	CPI		R24, 200			// 5 ms * 200 times = 1000 ms
+	BREQ	INC_SECONDS
+	RET
+
+ INC_SECONDS:
+	CLR		R24
+	INC		R18								// Modify R18 but not ZL
+	CPI		R18, LOW(TABLA7SEG<<1)+10		// Compares with A in display or 10 in seconds
+	BREQ	INC_DECADES
+	RET
+
+ INC_DECADES:
+ 	LDI		R18, LOW(TABLA7SEG<<1)
+	INC		R19
+	CPI		R19, LOW(TABLA7SEG<<1)+6
+	BREQ	RELOAD
+	RET
+
+ RELOAD:
+	LDI		R19, LOW(TABLA7SEG<<1)
+	RET
+
+ SECONDS:
+	MOV		ZL, R18				// STS. Return ZL
+	RJMP	DISPLAY
+
+ DECADES:
+	MOV		ZL, R19				// STS. Return ZL
+	RJMP	DISPLAY
+
+ DISPLAY:
+ ; Display: [PD7,PD6,PC0,PD4,PD3,PB0,PD5] : [a,b,c,d,e,f,g]
+ 	LPM		R17, Z				// Obtain indirect content
+	SBRC	R17, 6
+	SBI		PORTD, PD7
+	SBRS	R17, 6
+	CBI		PORTD, PD7
+	SBRC	R17, 5
+	SBI		PORTD, PD6
+	SBRS	R17, 5
+	CBI		PORTD, PD6
+	SBRC	R17, 4
+	SBI		PORTC, PC0
+	SBRS	R17, 4
+	CBI		PORTC, PC0
+	SBRC	R17, 3
+	SBI		PORTD, PD4
+	SBRS	R17, 3
+	CBI		PORTD, PD4
+	SBRC	R17, 2
+	SBI		PORTD, PD3
+	SBRS	R17, 2
+	CBI		PORTD, PD3
+	SBRC	R17, 1
+	SBI		PORTB, PB0
+	SBRS	R17, 1
+	CBI		PORTB, PB0
+	SBRC	R17, 0
+	SBI		PORTD, PD5
+	SBRS	R17, 0
+	CBI		PORTD, PD5
+	RET
+
+ COUNTER:
+	SBRC	R21, 3				// Setting/clearing bit 3
+	SBI		PORTB, PB4
+	SBRS	R21, 3
+	CBI		PORTB, PB4
+	SBRC	R21, 2				// Setting/clearing bit 2
+	SBI		PORTB, PB3
+	SBRS	R21, 2
+	CBI		PORTB, PB3
+	SBRC	R21, 1				// Setting/clearing bit 1
+	SBI		PORTB, PB2
+	SBRS	R21, 1
+	CBI		PORTB, PB2
+	SBRC	R21, 0				// Setting/clearing bit 0
+	SBI		PORTB, PB1
+	SBRS	R21, 0
+	CBI		PORTB, PB1
+
+	MOV		R22, R21			// Save Count[PB4,PB3,PB2,PB1] in R22
+	RET
+
+ PINCHANGE_INT1:
+	IN		R23, PINC
+	LDI		R16, (1<<TOIE2)
+	STS		TIMSK2, R16			// Overflow interrupt enable
+	LDI		R16, 12
+	STS		TCNT2, R16			// Restart Timer2
+	RETI
+
+ TIMER0_OVF:
+	LDI		R20, (1<<2)			// STEP single execution
+	RETI
+
+ TIMER2_OVF:
+	LDI		R16, (0<<PCIE1)
+	STS		PCICR, R16			// Pin change interrupt enable 1
+
+	IN		R16, PINC
+	OR		R16, R23
+	COM		R16					// Retentive condition of button
+	
+	SBRC	R16, PC1
+	LDI		R20, (1<<0)			// INCCOUNT single execution
+	SBRC	R16, PC2
+	LDI		R20, (1<<1)			// DECCOUNT single execution
+
+	LDI		R16, (0<<TOIE2)
+	STS		TIMSK2, R16			// Overflow interrupt disable
+	LDI		R16, (1<<PCIE1)
+	STS		PCICR, R16			// Pin change interrupt enable 1
+	RETI
